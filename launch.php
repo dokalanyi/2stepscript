@@ -104,7 +104,7 @@ function getmask($mask)
 
 function bitwiseandsum($value)
 	{
-		global $bin,$counter;
+		global $bin, $counter;
 		$firstbyte = substr(dechex(hexdec($value)+hexdec(8000)),4,2);
 		$secondbyte = substr(dechex(hexdec($value)+hexdec(8000)),2,2);
 		
@@ -255,6 +255,8 @@ function showashex($bin)
 
 function findFTOMN($bin)
 	{
+		global $MemLayout;
+		
 		$found=array();
 		
 		for($i=0; $i < strlen($bin); $i++)
@@ -300,6 +302,15 @@ function findFTOMN($bin)
 					}
 			}
 			
+		// Wurde FTOMN immer noch nicht gefunden
+		if( (count($found) < 1) AND ($MemLayout == 512) )
+			{
+				preg_match("/\xC2\xF4..\x40\x94\x9D\x02\xC2\xF9/s", $bin, $matches, PREG_OFFSET_CAPTURE);
+				
+				$temp=$matches[count($matches) - 1][1] + 10;
+				$found[]="1".lowEndian(bin2hex(substr($bin, $temp, 2)));
+			}
+		
 		return $found;
 	}
 
@@ -393,6 +404,87 @@ function findHole($bin, $size=256, $from=0, $to=0)
 		return false;
 	
 	}
+	
+function findFreeBool($safesearch=true)
+	{
+		// Globale Variablen
+		global $bin;
+		
+		// Temporäre ablage
+		$hex=bin2hex($bin);
+		$result=array();
+		
+		
+		// Suche nach Freien Variablen
+		for($i=1; $i < 127; $i++)
+			{
+				// Wurde eine Sichere Suche gewählt?
+				if($safesearch)
+					{
+						// Preg match nach JNB
+						preg_match_all("/9a".dechex($i)."...0/s", $hex, $matches, PREG_OFFSET_CAPTURE);
+						
+						// Schaue ob es durch 2 teilbar ist
+						for($x=0; $x < count($matches); $x++)
+							{
+								if( $matches[$x][1] % 2 != 0)
+									{
+										continue 2;
+									}
+							}
+					}
+				
+				// Preg match nach JB
+				preg_match_all("/8a".dechex($i)."...0/s", $hex, $matches, PREG_OFFSET_CAPTURE);
+				
+				// Schaue ob es durch 2 teilbar ist
+				for($x=0; $x < count($matches); $x++)
+					{
+						if( $matches[$x][1] % 2 != 0)
+							{
+								continue 2;
+							}
+					}
+					
+				// Schreibe das in das Ergebniss rein
+				$result[]=dechex($i);
+			}
+		
+		
+		// Wurde nichts gefunden?
+		if( (count($result) < 1) AND ($safesearch) )
+			{
+				echo "Cannot find unused variable to inject status flags, i try unsafe search!\n";
+				$unsaferesult=findFreeBool(false);
+				return $unsaferesult;
+			}
+		elseif(count($result) < 1)
+			{
+				echo "Im sorry i cannot find unused variable for status flags!\n";
+				die();
+			}
+			
+		// Gebe Freie Adressen aus
+		echo "Found usable status flag variable at 0x00FD".dechex(hexdec($result[0]) * 2)."\n";
+		return $result[0];
+	}
+
+// Existiert str_split
+if(!function_exists("str_split"))
+	{
+		// Bilde str_split nach
+		function str_split($string, $ln)
+			{
+				$return=array();
+				for($i=0; $i < strlen($string); $i += $ln)
+					{
+						$return[]=substr($string, $i, $ln);
+					}
+					
+				return $return;
+			}
+	}
+
 
 // Init area
 
@@ -430,7 +522,7 @@ for($i=0; $i < 10; $i++)
 			}
 	}
 
-// Wurde kein Variablenoffset eingegeben so benutze den Standard Offset
+// Wurde kein Variablenoffset für Counter_NLS eingegeben so benutze den Standard Offset
 if($argv[5] == "")
 	{
 		$argv[5]="0x384FF0";
@@ -508,6 +600,27 @@ else
 	}
 
 
+// Find tmotlin
+echo "finding tmotlin...\r\n";
+$tmotlin = obn("tmotlin");
+$tmot = obn("tmot");
+
+if ($tmotlin)
+	{
+		echo "found: $tmotlin\r\n";
+	}
+elseif($tmot)
+	{
+		$tmotlin = $tmot;
+		echo "tmotlin not found, using tmot: ".$tmotlin."\r\n";
+	}
+else
+	{
+		die("fatal error not found tmotlin/tmot");
+	}
+
+
+
 echo "finding B_kuppl (clutch pedal)...\r\n";
 
 $kuppl = obn("b_kuppl");
@@ -534,9 +647,33 @@ die("fatal error not found brems");
 
 $bin = file_get_contents($argv[1]);
 
-if (!$bin) {
-die('i cant find any ecu to read or write, put in same folder with name '.$argv[1]);
-}
+if (!$bin)
+	{
+		die('i cant find any ecu to read or write, put in same folder with name '.$argv[1]);
+	}
+	
+	
+// Prüfe ob es ein 29F400 oder 29F800 chip ist
+$MemLayout=0;
+
+if( (strlen($bin) / 1024) == "512")
+	{
+		echo "Memory Layout: 29F400 Found\n";
+		$MemLayout=512;
+	}
+elseif( (strlen($bin) / 1024) == "1024")
+	{
+		echo "Memory Layout: 29F800 Found\n";
+		$MemLayout=1024;
+	}
+else
+	{
+		die("Invalid Filesize, possible are 512/1024k, current size is ".(strlen($bin) / 1024)."\n");
+	}
+
+
+// Suche Freie 16Bit Bool Variable
+$freeBool=findFreeBool();
 
 
 // Suche FTOMN
@@ -631,14 +768,40 @@ if($isUsed)
 echo "using 0x".$argv[5]." for NLS Counter variable\n";
 
 
-echo "Finding the offset for call to the code cave..\r\n";
 
-$search=0;
-while ($search=strpos($bin,"\xD7\x40\x06\x02\x03\xF8",$search+1))
+// Suche den ub abruf zum injetieren des calls
+echo "Finding the offset for call to the code cave..\r\n";
+$jump=0;
+
+if($MemLayout == 1024)
 	{
-		if ($search != 0)
-		$jump=$search-4;
+		$search=0;
+		while ($search=strpos($bin,"\xD7\x40\x06\x02\x03\xF8",$search+1))
+			{
+				if ($search != 0)
+				$jump=$search-4;
+			}
 	}
+elseif($MemLayout == 512)
+	{
+		// Suche nach Vorkomniss
+		preg_match("/\xF0\x49\xF7\xF8..\xF3\xF8/s", $bin, $matches, PREG_OFFSET_CAPTURE);
+		
+		
+		// Hole Letztes Ergebniss
+		$jump=$matches[count($matches) - 1][1];
+		
+		// Addiere Länge
+		$jump+=6;
+	}
+
+
+// Wurde was gefunden
+if($jump < 1)
+	{
+		die("cannot find offset for code cave!\n");
+	}
+
 
 echo "call will be located at: 0x" . dechex($jump);
 
@@ -671,14 +834,12 @@ $bin[$jump+3] = hex2raw($thirdbyte);
 
 // SET DEFAULT CONFIG FOR LAUNCH CONTROL:
 
-$reeplace = array("\xA6","\x01","\x50","\x46","\x0A","\x00","\xF0","\x55","\xE6");
+$reeplace = array("\xA6","\x01","\x50","\x46","\x0A","\x00","\xF0","\x55","\xE6","\xA4");
 
-for($i=0;$i<9;$i++) {
-$bin[$launchvars+$i] = $reeplace[$i];
-}
-
-
-
+for($i = 0; $i < count($reeplace); $i++)
+	{
+		$bin[$launchvars+$i] = $reeplace[$i];
+	}
 
 $line1 = array("\x9A","\x2B","\x13","\x80","\xF2","\xF4","\x40","\x8E","\xD7","\x00","\x81","\x00","\xF2","\xF9","\x00","\x7E");
 
@@ -697,6 +858,32 @@ $line1 = array("\x9A","\x2B","\x13","\x80","\xF2","\xF4","\x40","\x8E","\xD7","\
 echo "\r\n\r\nWriting lines of code\r\n";
 
 $counter = $codecave;
+
+// Translin Threshold Check Line 0 C2 F4 81 C8 D7 00 81 00 C2 F9 A9 6E 40 49 FD 40
+$bin[$counter] = "\xC2"; $counter++;
+$bin[$counter] = "\xF4"; $counter++;
+
+// Insert tmotlin
+bitwiseandsum($tmotlin);
+
+$bin[$counter] = "\xD7"; $counter++;
+$bin[$counter] = "\x00"; $counter++;
+$bin[$counter] = "\x81"; $counter++;
+$bin[$counter] = "\x00"; $counter++;
+$bin[$counter] = "\xC2"; $counter++;
+$bin[$counter] = "\xF9"; $counter++;
+
+// Read from Flash
+bitwise($launchvars+9, $bin, $counter);
+
+$bin[$counter] = "\x40"; $counter++;
+$bin[$counter] = "\x49"; $counter++;
+$bin[$counter] = "\xFD"; $counter++;
+$bin[$counter] = "\x40"; $counter++;
+
+
+
+// Begin LC Function
 $bin[$counter] = "\x9A"; $counter++;
 $bin[$counter] = hex2raw(offset2bit($kuppl)); $counter++;
 $bin[$counter] = "\x13"; $counter++;
